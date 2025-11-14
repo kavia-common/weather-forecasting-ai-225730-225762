@@ -20,6 +20,7 @@ beforeEach(() => {
           temperature_2m: Array.from({ length: 24 }, () => 20),
           precipitation: Array.from({ length: 24 }, () => 0),
           windspeed_10m: Array.from({ length: 24 }, () => 10),
+          relativehumidity_2m: Array.from({ length: 24 }, () => 60),
         },
         daily: {
           time: ['2025-01-01'],
@@ -57,4 +58,9 @@ test('performs a successful search and renders forecast', async () => {
 
   // Check for one of the normalized fields (temperature chip)
   expect(screen.getByText(/Temperature/i)).toBeInTheDocument();
+
+  // Hourly section should render some list items
+  await waitFor(() => {
+    expect(screen.getByText(/Hourly Temperatures/)).toBeInTheDocument();
+  });
 });

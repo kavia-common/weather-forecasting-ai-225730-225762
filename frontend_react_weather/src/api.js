@@ -9,10 +9,15 @@
 // Note: These are non-secret and safe to expose in frontend.
 //
 export function getOpenMeteoBases() {
-  const forecastBase =
-    (process.env.REACT_APP_OPEN_METEO_BASE || 'https://api.open-meteo.com').replace(/\/+$/, '');
-  const geocodeBase =
-    (process.env.REACT_APP_OPEN_METEO_GEOCODE_BASE || 'https://geocoding-api.open-meteo.com').replace(/\/+$/, '');
+  // Ensure HTTPS and strip trailing slashes to avoid '//' in URLs
+  const fallbackForecast = 'https://api.open-meteo.com';
+  const fallbackGeocode = 'https://geocoding-api.open-meteo.com';
+  const forecastBase = String(process.env.REACT_APP_OPEN_METEO_BASE || fallbackForecast)
+    .replace(/^http:\/\//i, 'https://')
+    .replace(/\/+$/, '');
+  const geocodeBase = String(process.env.REACT_APP_OPEN_METEO_GEOCODE_BASE || fallbackGeocode)
+    .replace(/^http:\/\//i, 'https://')
+    .replace(/\/+$/, '');
   return { forecastBase, geocodeBase };
 }
 
@@ -26,11 +31,21 @@ export function getOpenMeteoBases() {
  * @throws Error with user-safe message
  */
 export async function fetchJson(url, options = {}) {
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      // Always use CORS-friendly defaults; Open-Meteo supports CORS over HTTPS
+      mode: 'cors',
+      ...options,
+    });
+  } catch (networkErr) {
+    const err = new Error('Network error. Please check your internet connection and try again.');
+    err.cause = networkErr;
+    throw err;
+  }
+
   const text = await res.text();
   const data = text ? tryJson(text) : null;
   if (!res.ok) {
@@ -51,9 +66,10 @@ export async function fetchJson(url, options = {}) {
  * @returns {Promise<Array<{id?: number, name: string, country?: string, latitude: number, longitude: number}>>}
  */
 export async function searchLocations(query) {
-  const q = (query || '').trim();
+  const q = sanitizeQuery(query);
   if (!q) return [];
   const { geocodeBase } = getOpenMeteoBases();
+  // Open-Meteo geocoding expects: name, count, language, format
   const url = `${geocodeBase}/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`;
   const data = await fetchJson(url);
   const results = Array.isArray(data?.results) ? data.results : [];
@@ -98,9 +114,12 @@ export async function getForecast({ latitude, longitude, params = {} }) {
     latitude: String(latitude),
     longitude: String(longitude),
     current_weather: 'true',
-    hourly: 'temperature_2m,precipitation,windspeed_10m',
+    // Include humidity along with temperature, precipitation, and windspeed
+    hourly: 'temperature_2m,relativehumidity_2m,precipitation,windspeed_10m',
     daily: 'temperature_2m_max,temperature_2m_min,precipitation_sum',
     timezone: 'auto',
+    // Choose kmh for consistency with UI; callers may override to 'mph'
+    windspeed_unit: 'kmh',
   };
   const qs = new URLSearchParams({ ...defaults, ...params });
   const url = `${forecastBase}/v1/forecast?${qs.toString()}`;
@@ -177,6 +196,7 @@ export async function fetchWeatherByQuery(query) {
       temperature_2m: Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m : [],
       precipitation: Array.isArray(hourly.precipitation) ? hourly.precipitation : [],
       windspeed_10m: Array.isArray(hourly.windspeed_10m) ? hourly.windspeed_10m : [],
+      relativehumidity_2m: Array.isArray(hourly.relativehumidity_2m) ? hourly.relativehumidity_2m : [],
     },
     daily: {
       time: Array.isArray(daily.time) ? daily.time : [],

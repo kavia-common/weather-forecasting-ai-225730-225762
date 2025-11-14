@@ -49,6 +49,11 @@ export default function SearchForecast() {
       setStatus({ type: 'error', message: 'Please enter a location or coordinates.' });
       return;
     }
+    // If this is a text search (not coordinates), require at least 2 characters
+    if (!isCoordinates(q) && q.length < 2) {
+      setStatus({ type: 'error', message: 'Please enter at least 2 characters for city/country.' });
+      return;
+    }
     if (isCoordinates(q)) {
       const [lat, lon] = q.split(',').map((v) => Number(v));
       if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
@@ -159,6 +164,9 @@ function ForecastCards({ data, loading, error }) {
             <InfoChip label="Wind" value={current.windKph == null ? '—' : `${fmtNum(current.windKph)} km/h`} />
             <InfoChip label="Feels Like" value={current.feelsLikeC == null ? '—' : `${fmtNum(current.feelsLikeC)} °C`} />
             <InfoChip label="Summary" value={current.summary || '—'} />
+            {Array.isArray(hourly.relativehumidity_2m) && hourly.relativehumidity_2m.length > 0 && (
+              <InfoChip label="Humidity" value={`${fmtNum(hourly.relativehumidity_2m[0])} %`} />
+            )}
           </div>
         )}
         {!loading && !error && !data && (
