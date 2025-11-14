@@ -1,62 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './App.css';
 import './index.css';
-
-/**
- * Small environment-aware API client using REACT_APP_API_BASE or REACT_APP_BACKEND_URL.
- * Falls back to relative /api when not provided.
- */
-const getApiBase = () => {
-  const base =
-    process.env.REACT_APP_API_BASE ||
-    process.env.REACT_APP_BACKEND_URL ||
-    '';
-  if (base && /^https?:\/\//i.test(base)) return base.replace(/\/+$/, '');
-  // As a safe default, use a relative path to support proxying in dev setups
-  return '';
-};
-
-// PUBLIC_INTERFACE
-export function apiFetch(path, options = {}) {
-  /** Fetch wrapper for backend APIs using configured base URL.
-   * - path: string - API path such as '/weather?city=London'
-   * Returns JSON or throws an error with safe message (no secrets).
-   */
-  const base = getApiBase();
-  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
-  return fetch(url, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-    ...options,
-  }).then(async (res) => {
-    const text = await res.text();
-    const data = text ? safeJson(text) : null;
-    if (!res.ok) {
-      const msg =
-        (data && (data.message || data.error)) ||
-        `Request failed (${res.status})`;
-      const error = new Error(msg);
-      error.status = res.status;
-      error.payload = data;
-      throw error;
-    }
-    return data;
-  }).catch((err) => {
-    // Do not leak any env/secret information
-    if (process.env.REACT_APP_LOG_LEVEL === 'debug') {
-      // eslint-disable-next-line no-console
-      console.debug('[apiFetch] error', err?.message);
-    }
-    throw err;
-  });
-}
-
-function safeJson(text) {
-  try { return JSON.parse(text); } catch { return null; }
-}
+import { fetchWeatherByQuery } from './api';
 
 /** Theme hook to allow basic light/dark switching if needed via feature flag */
 function useTheme() {
@@ -128,7 +73,7 @@ function SearchSection({ onSearch, loading }) {
         </button>
       </form>
       <div className="helper" style={{ marginTop: 8 }}>
-        Tip: We never store your searches. All requests go to your configured backend.
+        Tip: Enter a city/country (e.g., "London, UK") or coordinates ("37.7749,-122.4194"). Data is fetched directly from Open‑Meteo.
       </div>
     </div>
   );
@@ -156,6 +101,11 @@ function AIInsights({ insights, loading, error }) {
 
 /** Forecast summary card */
 function ForecastSummary({ data, loading, error }) {
+  const current = data?.current || {};
+  const hourly = data?.hourly || {};
+  const nextTemps = Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m.slice(0, 24) : [];
+  const nextPrec = Array.isArray(hourly.precipitation) ? hourly.precipitation.slice(0, 24) : [];
+
   return (
     <div className="card panel" aria-live="polite">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
@@ -167,17 +117,17 @@ function ForecastSummary({ data, loading, error }) {
       {!loading && !error && data && (
         <div className="results-grid" style={{ marginTop: 10 }}>
           <div className="row">
-            <InfoChip label="Temperature" value={`${fmtNum(data.tempC)} °C`} />
-            <InfoChip label="Feels Like" value={`${fmtNum(data.feelsLikeC)} °C`} />
-            <InfoChip label="Humidity" value={`${fmtNum(data.humidity)} %`} />
-            <InfoChip label="Wind" value={`${fmtNum(data.windKph)} km/h`} />
+            <InfoChip label="Temperature" value={`${fmtNum(current.tempC)} °C`} />
+            <InfoChip label="Feels Like" value={`${fmtNum(current.feelsLikeC)} °C`} />
+            <InfoChip label="Humidity" value={current.humidity == null ? '—' : `${fmtNum(current.humidity)} %`} />
+            <InfoChip label="Wind" value={`${fmtNum(current.windKph)} km/h`} />
           </div>
           <div className="chart-placeholder">
-            Interactive chart placeholder (temperature next 24h)
+            Next 24h • Avg Temp {fmtNum(avg(nextTemps))} °C • Total Precip {fmtNum(sum(nextPrec))} mm
           </div>
-          {data.summary && (
+          {current.summary && (
             <div className="helper" style={{ marginTop: 6 }}>
-              Summary: {data.summary}
+              Summary: {current.summary}
             </div>
           )}
         </div>
@@ -206,7 +156,9 @@ function SidePanel({ meta }) {
       <div className="helper">Environment</div>
       <ul style={{ marginTop: 6, paddingLeft: 18 }}>
         <li>Env: {process.env.REACT_APP_NODE_ENV || process.env.NODE_ENV || 'development'}</li>
-        <li>API: {process.env.REACT_APP_API_BASE || process.env.REACT_APP_BACKEND_URL || '(relative /api)'}</li>
+        <li>Provider: {process.env.REACT_APP_WEATHER_PROVIDER || 'open-meteo'}</li>
+        <li>OM Base: {process.env.REACT_APP_OPEN_METEO_BASE || 'https://api.open-meteo.com'}</li>
+        <li>OM Geocode: {process.env.REACT_APP_OPEN_METEO_GEOCODE_BASE || 'https://geocoding-api.open-meteo.com'}</li>
         <li>Flags: {process.env.REACT_APP_FEATURE_FLAGS || 'none'}</li>
       </ul>
       <div className="helper" style={{ marginTop: 10 }}>About</div>
@@ -223,17 +175,7 @@ function SidePanel({ meta }) {
   );
 }
 
-/** Build the request paths based on safe encoding */
-function buildWeatherPath(q) {
-  const qp = encodeURIComponent(q);
-  // Expected backend route: GET /api/weather?query=<q>
-  return `/api/weather?query=${qp}`;
-}
-function buildInsightsPath(q) {
-  const qp = encodeURIComponent(q);
-  // Expected backend route: POST /api/ai/forecast with { query }, but GET acceptable as placeholder
-  return `/api/ai/forecast?query=${qp}`;
-}
+/* No backend paths required: we call Open‑Meteo directly via api.js */
 
 // PUBLIC_INTERFACE
 function App() {
@@ -259,9 +201,7 @@ function App() {
     setInsights('');
     setForecast(null);
     try {
-      // Weather endpoint
-      const weather = await apiFetch(buildWeatherPath(query));
-      const normalized = normalizeWeather(weather);
+      const normalized = await fetchWeatherByQuery(query);
       setForecast(normalized);
       setMeta({ lastUpdated: Date.now() });
     } catch (err) {
@@ -270,12 +210,11 @@ function App() {
       setLoading(false);
     }
 
-    // AI insights (best effort, do not block main result)
+    // Placeholder AI insights (no backend). In a future task, integrate real AI.
     setAiLoading(true);
     try {
-      const ai = await apiFetch(buildInsightsPath(query), { method: 'GET' });
-      const text = typeof ai === 'string' ? ai : (ai?.insights || ai?.summary || '');
-      setInsights(text || 'No AI commentary available.');
+      const tip = `Based on current conditions in ${query}, consider dressing in layers and checking hourly precipitation.`;
+      setInsights(tip);
     } catch (err) {
       setAiError(err?.message || 'Unable to generate AI insights.');
     } finally {
@@ -322,53 +261,15 @@ function fmtNum(n) {
   return Number(n).toFixed(1);
 }
 
-/** Normalize weather response to app-friendly schema */
-function normalizeWeather(raw) {
-  if (!raw) return null;
+function avg(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const s = arr.reduce((a, b) => a + Number(b || 0), 0);
+  return s / arr.length;
+}
 
-  // Try common shapes. This function is defensive since backend shape may vary.
-  const fromCommon = () => {
-    const loc = raw.location?.name || raw.name || raw.city || raw.query || '';
-    const tempC =
-      raw.tempC ??
-      raw.temperatureC ??
-      raw.current?.temp_c ??
-      (raw.main?.temp != null ? (Number(raw.main.temp) - 273.15) : null);
-    const feelsLikeC =
-      raw.feelsLikeC ??
-      raw.feels_like_c ??
-      raw.current?.feelslike_c ??
-      (raw.main?.feels_like != null ? (Number(raw.main.feels_like) - 273.15) : null);
-    const humidity =
-      raw.humidity ??
-      raw.current?.humidity ??
-      raw.main?.humidity ??
-      null;
-    const windKph =
-      raw.windKph ??
-      raw.current?.wind_kph ??
-      (raw.wind?.speed != null ? Number(raw.wind.speed) * 3.6 : null);
-    const summary =
-      raw.summary ??
-      raw.weather?.[0]?.description ??
-      raw.current?.condition?.text ??
-      '';
-
-    return {
-      location: loc || '—',
-      tempC: tempC != null ? Number(tempC) : null,
-      feelsLikeC: feelsLikeC != null ? Number(feelsLikeC) : null,
-      humidity: humidity != null ? Number(humidity) : null,
-      windKph: windKph != null ? Number(windKph) : null,
-      summary,
-    };
-  };
-
-  try {
-    return fromCommon();
-  } catch {
-    return null;
-  }
+function sum(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return 0;
+  return arr.reduce((a, b) => a + Number(b || 0), 0);
 }
 
 export default App;
