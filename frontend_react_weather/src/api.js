@@ -45,6 +45,29 @@ export async function fetchJson(url, options = {}) {
 
 /**
  * PUBLIC_INTERFACE
+ * searchLocations
+ * Search Open‑Meteo geocoding API for a list of matching locations.
+ * @param {string} query - e.g., "London" or "London, UK"
+ * @returns {Promise<Array<{id?: number, name: string, country?: string, latitude: number, longitude: number}>>}
+ */
+export async function searchLocations(query) {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const { geocodeBase } = getOpenMeteoBases();
+  const url = `${geocodeBase}/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`;
+  const data = await fetchJson(url);
+  const results = Array.isArray(data?.results) ? data.results : [];
+  return results.map((r) => ({
+    id: r.id,
+    name: r.name,
+    country: r.country,
+    latitude: Number(r.latitude),
+    longitude: Number(r.longitude),
+  }));
+}
+
+/**
+ * PUBLIC_INTERFACE
  * geocodeLocation
  * Uses Open‑Meteo geocoding API to resolve a textual query (city, country)
  * to latitude/longitude.
@@ -53,39 +76,34 @@ export async function fetchJson(url, options = {}) {
  * @returns {Promise<{ latitude: number, longitude: number, name?: string, country?: string }|null>}
  */
 export async function geocodeLocation(query) {
-  const { geocodeBase } = getOpenMeteoBases();
-  const q = encodeURIComponent(query.trim());
-  const url = `${geocodeBase}/v1/search?name=${q}&count=1&language=en&format=json`;
-  const data = await fetchJson(url);
-  const first = data?.results?.[0];
-  if (!first) return null;
-  return {
-    latitude: Number(first.latitude),
-    longitude: Number(first.longitude),
-    name: first.name,
-    country: first.country,
-  };
+  const results = await searchLocations(query);
+  return results[0] || null;
 }
 
 /**
  * PUBLIC_INTERFACE
  * getForecast
- * Fetches forecast from Open‑Meteo by lat/lon. Requests current weather and hourly temps/precip.
+ * Fetches forecast from Open‑Meteo by lat/lon. Requests current weather,
+ * hourly temp/precip/windspeed and daily aggregates (max/min temps, precip sum).
  *
- * @param {number} latitude
- * @param {number} longitude
+ * @param {Object} args
+ * @param {number} args.latitude
+ * @param {number} args.longitude
+ * @param {Object} [args.params] - Extra params to merge into request.
  * @returns {Promise<any>} Open‑Meteo response object
  */
-export async function getForecast(latitude, longitude) {
+export async function getForecast({ latitude, longitude, params = {} }) {
   const { forecastBase } = getOpenMeteoBases();
-  const params = new URLSearchParams({
+  const defaults = {
     latitude: String(latitude),
     longitude: String(longitude),
     current_weather: 'true',
-    hourly: 'temperature_2m,precipitation',
+    hourly: 'temperature_2m,precipitation,windspeed_10m',
+    daily: 'temperature_2m_max,temperature_2m_min,precipitation_sum',
     timezone: 'auto',
-  });
-  const url = `${forecastBase}/v1/forecast?${params.toString()}`;
+  };
+  const qs = new URLSearchParams({ ...defaults, ...params });
+  const url = `${forecastBase}/v1/forecast?${qs.toString()}`;
   return fetchJson(url);
 }
 
@@ -100,8 +118,9 @@ export async function getForecast(latitude, longitude) {
  * {
  *   source: 'open-meteo',
  *   location: 'City, Country' or 'lat,lon',
- *   current: { tempC: number, windKph: number, humidity: number|null, summary: string },
- *   hourly: { time: string[], temperature_2m: number[], precipitation: number[] },
+ *   current: { tempC: number, windKph: number, humidity: number|null, summary: string, feelsLikeC: number|null },
+ *   hourly: { time: string[], temperature_2m: number[], precipitation: number[], windspeed_10m: number[] },
+ *   daily: { time: string[], temperature_2m_max: number[], temperature_2_m_min?: number[], precipitation_sum: number[] },
  *   raw: <original open-meteo payload>
  * }
  *
@@ -109,7 +128,7 @@ export async function getForecast(latitude, longitude) {
  * @returns {Promise<object>}
  */
 export async function fetchWeatherByQuery(query) {
-  const trimmed = (query || '').trim();
+  const trimmed = sanitizeQuery(query);
   if (!trimmed) throw new Error('Please provide a location.');
 
   let lat = null;
@@ -121,6 +140,9 @@ export async function fetchWeatherByQuery(query) {
   if (coordMatch) {
     lat = Number(coordMatch[1]);
     lon = Number(coordMatch[3]);
+    if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      throw new Error('Invalid coordinates. Use "lat,lon" with valid ranges.');
+    }
     locLabel = `${lat.toFixed(4)},${lon.toFixed(4)}`;
   } else {
     // Geocode textual query
@@ -131,34 +153,45 @@ export async function fetchWeatherByQuery(query) {
     locLabel = [geo.name, geo.country].filter(Boolean).join(', ');
   }
 
-  const data = await getForecast(lat, lon);
+  const data = await getForecast({ latitude: lat, longitude: lon });
 
   // Map Open‑Meteo fields
   const current = data?.current_weather || {};
   const hourly = data?.hourly || {};
+  const daily = data?.daily || {};
 
-  // Open‑Meteo does not provide humidity in current_weather; keep null safely.
   const normalized = {
     source: 'open-meteo',
     location: locLabel || '—',
     current: {
       tempC: isNum(current.temperature) ? Number(current.temperature) : null,
       windKph: isNum(current.windspeed) ? Number(current.windspeed) : null,
-      humidity: null,
+      humidity: null, // not available in current_weather
       summary: typeof current.weathercode !== 'undefined'
         ? describeWeatherCode(current.weathercode)
         : '',
-      feelsLikeC: null, // Not provided directly; could be computed if desired
+      feelsLikeC: null, // could be computed in future
     },
     hourly: {
       time: Array.isArray(hourly.time) ? hourly.time : [],
       temperature_2m: Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m : [],
       precipitation: Array.isArray(hourly.precipitation) ? hourly.precipitation : [],
+      windspeed_10m: Array.isArray(hourly.windspeed_10m) ? hourly.windspeed_10m : [],
+    },
+    daily: {
+      time: Array.isArray(daily.time) ? daily.time : [],
+      temperature_2m_max: Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max : [],
+      temperature_2m_min: Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min : [],
+      precipitation_sum: Array.isArray(daily.precipitation_sum) ? daily.precipitation_sum : [],
     },
     raw: data,
   };
 
   return normalized;
+}
+
+function sanitizeQuery(q) {
+  return String(q || '').replace(/[^\w\s,\-\.]/g, '').trim();
 }
 
 function tryJson(t) {
@@ -169,8 +202,8 @@ function isNum(n) {
   return n !== null && n !== undefined && !Number.isNaN(Number(n));
 }
 
-// Basic mapping of Open‑Meteo WMO weather codes to human text
-function describeWeatherCode(code) {
+// PUBLIC_INTERFACE
+export function describeWeatherCode(code) {
   const map = {
     0: 'Clear sky',
     1: 'Mainly clear',
